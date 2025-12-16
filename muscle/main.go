@@ -3,36 +3,49 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"sort"
+	"strings"
+
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
-// This matches the JSON the Python server expects
+// --- DATA STRUCTURES ---
+
 type BrainRequest struct {
-	Command string `json:"command"`
+	SessionID string   `json:"session_id"`
+	Command   string   `json:"command"`
+	Cwd       string   `json:"cwd"`
+	History   []string `json:"history"`
 }
 
 type BrainResponse struct {
 	Output string `json:"output"`
 }
 
+type SessionState struct {
+	CurrentDir string
+	History    []string
+}
+
 func main() {
-	// 1. Configure the SSH Server
+	// 1. SSH Server Config
 	config := &ssh.ServerConfig{
-		// Allow ANY password (It's a trap!)
 		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			log.Printf("⚠️  Login attempt: User=%s Password=%s", c.User(), string(pass))
-			return nil, nil // Return nil to allow login
+			log.Printf("⚠️  Login: User=%s Pass=%s", c.User(), string(pass))
+			return nil, nil // Allow everyone
 		},
 	}
 
-	// 2. Load the Host Key we just generated
+	// 2. Load Keys
 	privateBytes, err := ioutil.ReadFile("hostkey")
 	if err != nil {
-		log.Fatal("Failed to load host key: ", err)
+		log.Fatal("Failed to load hostkey: ", err)
 	}
 	private, err := ssh.ParsePrivateKey(privateBytes)
 	if err != nil {
@@ -40,106 +53,212 @@ func main() {
 	}
 	config.AddHostKey(private)
 
-	// 3. Start Listening on Port 2222
+	// 3. Listen
 	listener, err := net.Listen("tcp", "0.0.0.0:2222")
 	if err != nil {
-		log.Fatal("Failed to listen on 2222: ", err)
+		log.Fatal("Failed to listen: ", err)
 	}
-	log.Println("🪤  GhostShell Muscle (SSH) listening on port 2222...")
+	log.Println("🚀 GhostShell Muscle (Instant Mode) listening on 2222...")
 
 	for {
 		nConn, err := listener.Accept()
 		if err != nil {
-			log.Println("Failed to accept incoming connection:", err)
 			continue
 		}
-		// Handle every connection in a separate Goroutine (Async!)
 		go handleConnection(nConn, config)
 	}
 }
 
 func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
-	// Upgrade TCP connection to SSH
 	_, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
-		log.Println("Handshake failed:", err)
 		return
 	}
-
-	// Discard global out-of-band requests
 	go ssh.DiscardRequests(reqs)
 
-	// Handle the channels (sessions)
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
 			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
-
 		channel, requests, err := newChannel.Accept()
 		if err != nil {
-			log.Println("Could not accept channel:", err)
 			continue
 		}
 
-		// Handle PTY requests (so it feels like a real terminal)
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
 				req.Reply(req.Type == "shell" || req.Type == "pty-req", nil)
 			}
 		}(requests)
 
-		// Start the Interactive Loop
-		go runInteractiveShell(channel)
+		go runSmartShell(channel)
 	}
 }
 
-func runInteractiveShell(channel ssh.Channel) {
+func runSmartShell(channel ssh.Channel) {
 	defer channel.Close()
 
+	// Use terminal wrapper for correct line editing (backspace, arrows)
+	term := term.NewTerminal(channel, "")
+	
+	state := &SessionState{
+		CurrentDir: "/root",
+		History:    []string{},
+	}
+
 	// Fake Welcome Message
-	channel.Write([]byte("Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-91-generic x86_64)\r\n"))
-	channel.Write([]byte("System information as of " + "Wed Dec 3 20:00:00 UTC 2025" + "\r\n\r\n"))
+	term.Write([]byte("Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-91-generic x86_64)\r\n"))
+	term.Write([]byte(" * Documentation:  https://help.ubuntu.com\r\n"))
+	term.Write([]byte(" * Management:     https://landscape.canonical.com\r\n"))
+	term.Write([]byte(" * Support:        https://ubuntu.com/advantage\r\n\r\n"))
+	term.Write([]byte("System information as of " + state.CurrentDir + "\r\n\r\n"))
 
-	buffer := make([]byte, 1024)
 	for {
-		// 1. Show Prompt
-		channel.Write([]byte("root@server:~# "))
+		// Set Prompt
+		prompt := fmt.Sprintf("root@server:%s# ", state.CurrentDir)
+		term.SetPrompt(prompt)
 
-		// 2. Read Input
-		n, err := channel.Read(buffer)
+		line, err := term.ReadLine()
 		if err != nil {
 			break
 		}
 
-		// Cleanup input (remove newlines/whitespace)
-		// In a real terminal, we might need more complex parsing, but this works for basic commands
-		cleanCmd := string(bytes.TrimSpace(buffer[:n]))
-		
-		if cleanCmd == "exit" {
+		rawCmd := strings.TrimSpace(line)
+		if rawCmd == "" {
+			continue
+		}
+		if rawCmd == "exit" {
 			break
 		}
 
-		// 3. Send to Python Brain (Localhost:5000)
-		// We define the JSON payload
-		reqBody, _ := json.Marshal(BrainRequest{Command: cleanCmd})
-		
-		// Post to the Python service
-		// NOTE: In Docker, this URL might change to "http://brain:5000", but for local testing "localhost" is fine.
-		resp, err := http.Post("http://localhost:5000/hallucinate", "application/json", bytes.NewBuffer(reqBody))
-		
-		if err != nil {
-			log.Println("Error contacting Brain:", err)
-			channel.Write([]byte("\r\nSystem Error: AI Brain unreachable.\r\n"))
+		// Update History
+		state.History = append(state.History, rawCmd)
+		if len(state.History) > 10 {
+			state.History = state.History[1:]
+		}
+
+		// --- INSTANT MODE: LOCAL HANDLING ---
+
+		// 1. Handle 'pwd'
+		if rawCmd == "pwd" {
+			term.Write([]byte(state.CurrentDir + "\r\n"))
 			continue
 		}
 
-		// 4. Read Response and Print to User
-		var result BrainResponse
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
+		// 2. Handle 'ls' (Read from fakeFS)
+		if rawCmd == "ls" || rawCmd == "ll" || rawCmd == "ls -la" {
+			files, exists := fakeFS[state.CurrentDir]
+			if !exists {
+				// If dir isn't in our map, imply it's empty or fallback to AI
+				term.Write([]byte("\r\n")) 
+			} else {
+				// Sort and print files like columns
+				sort.Strings(files)
+				output := strings.Join(files, "  ")
+				term.Write([]byte(output + "\r\n"))
+			}
+			continue
+		}
 
-		// Write the output (and add a carriage return/newline)
-		channel.Write([]byte("\r\n" + result.Output + "\r\n"))
+		// 3. Handle 'cd' (Update state instantly)
+		if strings.HasPrefix(rawCmd, "cd ") {
+			target := strings.TrimSpace(strings.TrimPrefix(rawCmd, "cd "))
+			
+			// Resolve new path
+			newDir := resolvePath(state.CurrentDir, target)
+
+			// Check if it exists in our FakeFS
+			if _, ok := fakeFS[newDir]; ok {
+				state.CurrentDir = newDir
+			} else {
+				term.Write([]byte("-bash: cd: " + target + ": No such file or directory\r\n"))
+			}
+			continue
+		}
+
+		// --- SLOW MODE: ASK THE BRAIN ---
+		// If it wasn't ls/cd/pwd, we send it to Python/Gemini
+		
+		go func() { // Run in background so we don't block? (Actually we want to block for output)
+			// Construct Request
+			reqBody, _ := json.Marshal(BrainRequest{
+				SessionID: "session-123",
+				Command:   rawCmd,
+				Cwd:       state.CurrentDir,
+				History:   state.History,
+			})
+
+			// Call Python
+			resp, err := http.Post("http://localhost:5000/hallucinate", "application/json", bytes.NewBuffer(reqBody))
+			if err != nil {
+				term.Write([]byte("Error: Connection to Brain failed.\r\n"))
+				return
+			}
+			defer resp.Body.Close()
+
+			var result BrainResponse
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				return
+			}
+
+			// Format and print
+			cleanOutput := strings.ReplaceAll(result.Output, "\n", "\r\n")
+			if cleanOutput != "" {
+				term.Write([]byte(cleanOutput + "\r\n"))
+			}
+			
+			// Re-print prompt is handled by next loop iteration
+		}()
+		
+		// Wait for the AI response before looping back to prompt?
+		// In a simple loop, yes. The 'go func' above is actually risky if we want synchronous output.
+		// Let's do it synchronously for now to keep the prompt tidy.
+		
+		reqBody, _ := json.Marshal(BrainRequest{
+			SessionID: "session-123",
+			Command:   rawCmd,
+			Cwd:       state.CurrentDir,
+			History:   state.History,
+		})
+
+		resp, err := http.Post("http://localhost:5000/hallucinate", "application/json", bytes.NewBuffer(reqBody))
+		if err != nil {
+			term.Write([]byte("Remote Error.\r\n"))
+		} else {
+			var result BrainResponse
+			json.NewDecoder(resp.Body).Decode(&result)
+			resp.Body.Close()
+			cleanOutput := strings.ReplaceAll(result.Output, "\n", "\r\n")
+			if cleanOutput != "" {
+				term.Write([]byte(cleanOutput + "\r\n"))
+			}
+		}
 	}
+}
+
+// Helper to handle "cd .." and relative paths
+func resolvePath(current, target string) string {
+	if target == "/" {
+		return "/"
+	}
+	if target == ".." {
+		// Move up one level
+		if current == "/" {
+			return "/"
+		}
+		lastSlash := strings.LastIndex(current, "/")
+		if lastSlash == 0 {
+			return "/" // Parent of /root is /
+		}
+		return current[:lastSlash]
+	}
+	if strings.HasPrefix(target, "/") {
+		return target // Absolute path
+	}
+	// Relative path
+	if current == "/" {
+		return "/" + target
+	}
+	return current + "/" + target
 }

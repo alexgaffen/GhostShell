@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # The AI Brain (Python)
   brain:
