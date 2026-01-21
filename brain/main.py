@@ -136,22 +136,46 @@ async def hallucinate(req: BrainRequest):
         data = json.loads(response.text)
         
         # --- ACTIVE DEFENSE LOGIC ---
-        # For now, we still return "standard" to keep the shell usable.
-        # But we log the "bait" option which the Dashboard will eventually use.
-        
-        # NOTE: If the command is purely informational (like 'lscpu' or 'df'), 
-        # we might want to default to 'bait' immediately if the profile matches!
-        
-        selected_output = data.get("standard", "")
-        
-        # AUTO-ESCALATION:
-        # If the shadow agent detects high-value intent (Miner/Ransomware),
-        # we can automatically swap to the 'bait' response to keep them interested.
-        if profile['motivation'] in ["Miner", "Ransomware", "APT"]:
-             if data.get("bait"):
-                 print("⚠️  AUTO-ESCALATION: Switching to BAIT response to hook attacker.")
-                 selected_output = data.get("bait")
+        cmd = (req.command or "").strip().lower()
+        cmd_base = cmd.split()[0] if cmd else ""
 
+        info_cmds = {"ls", "ll", "la", "pwd", "whoami", "id", "uname", "uptime", "df", "free", "lscpu", "lsblk", "ip", "ifconfig", "ss", "netstat", "ps", "top"}
+        recon_cmds = {"cat", "less", "more", "head", "tail", "grep", "find", "locate"}
+        download_cmds = {"curl", "wget", "scp"}
+        priv_cmds = {"sudo", "su"}
+        destructive_cmds = {"rm", "dd", "mkfs", "shutdown", "reboot", "poweroff"}
+
+        selected_output = data.get("standard", "")
+        selected_reason = "standard"
+
+        # Stall on clearly destructive or bot-like payloads to slow automation
+        if data.get("stall"):
+            if cmd_base in destructive_cmds:
+                selected_output = data.get("stall")
+                selected_reason = "stall:destructive"
+            elif profile.get("motivation") == "Bot/Script" and (
+                cmd_base in download_cmds
+                or "chmod +x" in cmd
+                or "base64" in cmd
+                or cmd_base in priv_cmds
+            ):
+                selected_output = data.get("stall")
+                selected_reason = "stall:bot"
+
+        # Use bait on informational / recon commands when it helps profiling
+        if selected_reason == "standard" and data.get("bait"):
+            if cmd_base in info_cmds or cmd_base in recon_cmds:
+                if profile.get("motivation") in ["Miner", "Ransomware", "APT", "Scout"]:
+                    selected_output = data.get("bait")
+                    selected_reason = "bait:info_recon"
+
+        # Auto-escalate for high-value intent when no stall applied
+        if selected_reason == "standard" and data.get("bait"):
+            if profile.get("motivation") in ["Miner", "Ransomware", "APT"]:
+                selected_output = data.get("bait")
+                selected_reason = "bait:auto_escalation"
+
+        print(f"🛡️  Defense decision: {selected_reason}")
         return {"output": selected_output}
 
     except Exception as e:
