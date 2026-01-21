@@ -26,6 +26,9 @@ app = FastAPI()
 
 # --- DATA STRUCTURES ---
 
+# In-memory session profiling memory (ephemeral)
+PROFILE_MEMORY = {}
+
 class BrainRequest(BaseModel):
     session_id: str
     command: str
@@ -45,6 +48,9 @@ def run_shadow_agent(req: BrainRequest) -> dict:
     Analyzes the attacker's behavior to determine their intent.
     Does not generate output for the user, only for the System.
     """
+    prior_profile = PROFILE_MEMORY.get(req.session_id)
+    prior_profile_str = json.dumps(prior_profile) if prior_profile else "None"
+
     prompt = f"""
     You are a Cybersecurity Analyst (Shadow Agent) monitoring a honeypot.
     
@@ -52,6 +58,7 @@ def run_shadow_agent(req: BrainRequest) -> dict:
     - Command: "{req.command}"
     - History: {req.history}
     - CWD: {req.cwd}
+    - Prior Profile: {prior_profile_str}
     
     TASK:
     Classify the attacker's likely motivation based on their commands.
@@ -73,10 +80,14 @@ def run_shadow_agent(req: BrainRequest) -> dict:
     
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text)
+        profile = json.loads(response.text)
+        PROFILE_MEMORY[req.session_id] = profile
+        return profile
     except Exception:
         # Fallback profile if AI fails
-        return {"motivation": "Unknown", "reasoning": "Error", "suggested_bait": "Standard weak password file"}
+        fallback = {"motivation": "Unknown", "reasoning": "Error", "suggested_bait": "Standard weak password file"}
+        PROFILE_MEMORY[req.session_id] = fallback
+        return fallback
 
 # --- THE DIRECTOR (GENERATOR) ---
 
