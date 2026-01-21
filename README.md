@@ -1,6 +1,6 @@
 # 👻 GhostShell: Hybrid Adaptive Honeypot
 
-GhostShell is a next-generation high-interaction honeypot that combines the speed of a static system with the anti-hacker creativity of an LLM. It uses a **Go** "Muscle" to set up an ssh server with fake authentication, and a skeleton filesystem for instant navigation. The power is in the **Python/Gemini** "Brain", which hallucinates realistic content and profile attackers in real-time, and comes into play when it can intelligently deceive the attacker.
+GhostShell is a next-generation high-interaction honeypot that combines the speed of a static system with the anti-hacker creativity of an LLM. It uses a **Go** "Muscle" to set up an ssh server with fake authentication, and a skeleton filesystem for instant navigation. The power is in the **Python/Gemini** "Brain", which hallucinates realistic content and profiles attackers in real-time, coming into play when it can intelligently deceive the hacker.
 
 ![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go)
 ![Python](https://img.shields.io/badge/Python-3.9-3776AB?logo=python)
@@ -74,4 +74,5 @@ go run .
 ```bash
 ssh -p 2222 root@localhost
 ```
+
 
